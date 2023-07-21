@@ -74,7 +74,18 @@ namespace async::detail {
     };
 }
 
+namespace async::detail {
+    class tcp_stream {
+        task<void> wait_read() { co_await poll_loop.wait_read(fd); }
+        task<void> wait_write() { co_await poll_loop.wait_write(fd); }
+        size_t raw_read(void* buf, size_t size) { return posix::c_api::read(fd, buf, size); }
+        explicit tcp_stream(int fd) : fd(fd) {}
+        detail::fd_handle fd;
+    };
+}
+
 namespace async {
+
     class stream {
     public:
         task<size_t> read_some(std::string& out) {
@@ -84,7 +95,7 @@ namespace async {
                 co_await poll_loop.wait_read(fd);
                 const size_t n_available = posix::c_api::available_bytes(fd);
                 out.resize(out.size() + n_available);
-                size_t n_read = posix::c_api::recv(fd, out.data() + out.size() - n_available, n_available);
+                size_t n_read = posix::c_api::read(fd, out.data() + out.size() - n_available, n_available);
                 assert(n_read == n_available);
                 co_return n_read;
             }
@@ -131,10 +142,10 @@ namespace async {
             co_return ret;
         }
         task<void> write(std::string_view str) {
-            str = str.substr(posix::c_api::send(fd, str));
-            while (!str.empty()) [[unlikely]] {
+            str = str.substr(posix::c_api::write(fd, str));
+            while (!str.empty()) {
                 co_await poll_loop.wait_write(fd);
-                str = str.substr(posix::c_api::send(fd, str));
+                str = str.substr(posix::c_api::write(fd, str));
             }
         }
         static stream from_fd(int fd) { return stream{fd}; }
@@ -170,7 +181,27 @@ namespace async {
         }
         co_return stream::from_fd(fd);
     }
-};
+
+    class server {
+    public:
+        task<stream> accept() {
+            co_await poll_loop.wait_read(server_fd);
+            int client_fd = posix::c_api::accept(server_fd);
+            assert(client_fd != -1);
+            co_return stream::from_fd(client_fd);
+        }
+        static server from_fd(int fd) { return server{fd}; }
+    private:
+        explicit server(int fd) : server_fd(fd) {}
+    private:
+        detail::fd_handle server_fd;
+    };
+
+    task<server> listen(const char* ip, uint16_t port) {
+        int fd = posix::c_api::bind_listen(ip, port);
+        co_return server::from_fd(fd);
+    }
+}
 
 task<void> foo() {
     prn("foo() start");
@@ -181,6 +212,16 @@ task<void> foo() {
     prn(buf);
     prn("foo() end");
     co_return;
+}
+
+struct some_resource {
+    some_resource() { prn("ctor"); }
+    ~some_resource() { prn("dtor"); }
+};
+
+task<void> bar() {
+    some_resource r;
+    co_await std::suspend_always();
 }
 
 int main() {

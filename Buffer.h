@@ -107,7 +107,7 @@ namespace async::detail {
                 n_read = 0;
                 if (!eof) {
                     try {
-                        n_read = posix::c_api::recv(fd, buf.data() + filled, buflen);
+                        n_read = posix::c_api::read(fd, buf.data() + filled, buflen);
                     } catch (const posix::c_api::eof& e) {
                         if (empty()) { throw; }
                         eof = std::current_exception();
@@ -145,7 +145,7 @@ namespace async::detail {
             while (true) {
                 std::string_view todo = std::string_view(buf).substr(total_sent);
                 if (todo.empty()) { return; }
-                ssize_t n_sent = posix::c_api::send(fd, todo);
+                ssize_t n_sent = posix::c_api::write(fd, todo);
                 if (n_sent == 0) {
                     return;
                 }

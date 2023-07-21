@@ -1,4 +1,5 @@
 #pragma once
+#include <arpa/inet.h>
 #include <cassert>
 #include <unistd.h>
 #include <netdb.h>
@@ -15,37 +16,19 @@ namespace async::posix::c_api {
     };
 
     // Returns number of bytes written (may be zero)
-    inline size_t write(int sfd, std::string_view data) {
-        ssize_t n_sent = ::write(sfd, data.data(), data.size());
+    inline size_t write(int fd, std::string_view data) {
+        ssize_t n_sent = ::send(fd, data.data(), data.size(), MSG_NOSIGNAL);
         if (n_sent == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return 0;
-        }
-        ex::wrape(n_sent, "write()");
-        return n_sent;
-    }
-    // Returns number of bytes sent (may be zero)
-    inline size_t send(int sfd, std::string_view data) {
-        ssize_t n_sent = ::send(sfd, data.data(), data.size(), MSG_NOSIGNAL);
-        if (n_sent == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return 0;
+        } else if (n_sent == -1 && errno == EPIPE) {
+            throw eof();
         }
         ex::wrape(n_sent, "send()");
         return n_sent;
     }
     // Returns number of bytes read (may be zero)
-    inline size_t read(int sfd, void* buf, size_t size) {
-        ssize_t n_read = ::read(sfd, buf, size);
-        if (n_read == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return 0;
-        } else if (n_read == 0) {
-            throw eof();
-        }
-        ex::wrape(n_read, "read()");
-        return n_read;
-    }
-    // Returns number of bytes received (may be zero)
-    inline size_t recv(int sfd, void* buf, size_t size) {
-        ssize_t n_read = ::recv(sfd, buf, size, MSG_NOSIGNAL);
+    inline size_t read(int fd, void* buf, size_t size) {
+        ssize_t n_read = ::recv(fd, buf, size, MSG_NOSIGNAL);
         if (n_read == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return 0;
         } else if (n_read == 0) {
@@ -57,6 +40,7 @@ namespace async::posix::c_api {
     inline void fcntl(int fd, int cmd, int arg) {
         ex::wrape(::fcntl(fd, cmd, arg), "fcntl()");
     }
+    [[nodiscard]]
     inline size_t available_bytes(int fd) {
         int value;
         ex::wrape(::ioctl(fd, FIONREAD, &value), "ioctl()");
@@ -65,6 +49,7 @@ namespace async::posix::c_api {
     inline void setsockopt(int fd, int level, int optname, int optval) {
         ex::wrape(::setsockopt(fd, level, optname, &optval, sizeof(optval)), "setsockopt()");
     }
+    [[nodiscard]]
     inline int getsockopt(int fd, int level, int optname) {
         int optval;
         socklen_t optlen = sizeof(optval);
@@ -72,65 +57,43 @@ namespace async::posix::c_api {
         assert(optlen == sizeof(optval));
         return optval;
     }
-    // Returns a valid non-blocking socket
+    // Returns a non-blocking socket
+    [[nodiscard]]
     inline int socket(int domain, int type, int protocol) {
         int fd = ex::wrape(::socket(domain, type, protocol), "socket()");
         c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
         return fd;
     }
-    // Always returns a valid socket
-    inline int bind_listen(const char* host, const char* port) {
-        addrinfo hints {};
-        hints.ai_family = AF_UNSPEC;     // Allow IPv4 or IPv6
-        hints.ai_socktype = SOCK_STREAM;
-        hints.ai_flags = AI_PASSIVE;
-        hints.ai_protocol = IPPROTO_TCP;
-
-        addrinfo* ai_list;
-        int res = getaddrinfo(host, port, &hints, &ai_list);
-        if (res != 0) {
-            throw ex::runtime(fmt("getaddrinfo:", gai_strerror(res)));
-        }
-
-        // getaddrinfo() returns a list of address structures.
-        // Try each address until we successfully bind(2).
-        // If socket(2) or bind(2) fails, we close the socket
-        // and try the next address.
-
-        int sfd;
-        addrinfo* ai;
-        int saved_err = 0;
-        for (ai = ai_list; ai != NULL; ai = ai->ai_next) {
-            sfd = socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK, ai->ai_protocol);
-            if (sfd == -1) {
-                continue;
-            }
-            setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, 1);
-            if (bind(sfd, ai->ai_addr, ai->ai_addrlen) != -1) {
-                break;  // Success
-            }
-            saved_err = errno;
-            close(sfd);
-        }
-
-        freeaddrinfo(ai_list);
-
-        if (ai == NULL) {
-            throw ex::fn("bind()", strerror(saved_err));
-        }
-
-        ex::wrape(listen(sfd, 256), "listen()");
-
-        return sfd;
+    [[nodiscard]]
+    inline in_addr inet_aton(const char* ip) {
+        in_addr ret;
+        ex::wrapb(::inet_aton(ip, &ret), "inet_aton()");
+        return ret;
+    }
+    // Returns a non-blocking socket, ip may be nullptr for INADDR_ANY
+    [[nodiscard]]
+    inline int bind_listen(const char* ip, uint16_t port) {
+        int fd = c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        in_addr ia = ip ? c_api::inet_aton(ip) : in_addr{INADDR_ANY};
+        sockaddr_in addr = {
+            .sin_family = AF_INET,
+            .sin_port = htons(port),
+            .sin_addr = ia,
+            .sin_zero = {},
+        };
+        ex::wrape(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), "bind()");
+        ex::wrape(::listen(fd, 256), "listen()");
+        return fd;
     }
     // Returns accepted socket or -1
-    inline int accept(int sfd) {
-        int client = ::accept(sfd, nullptr, nullptr);
+    [[nodiscard]]
+    inline int accept(int fd) {
+        int client = ::accept(fd, nullptr, nullptr);
         if (client == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return -1;
         }
         ex::wrape(client, "accept()");
-        fcntl(client, F_SETFL, O_NONBLOCK);
+        c_api::fcntl(client, F_SETFL, O_NONBLOCK);
         return client;
     }
 }
