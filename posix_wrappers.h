@@ -10,31 +10,45 @@
 #include <sys/ioctl.h>
 
 // All functions are nonblocking and expect a nonblocking socket
-namespace async::posix::c_api {
+namespace async::c_api {
     struct eof : std::exception {
         virtual const char* what() const noexcept override { return "end of stream"; }
     };
 
+    // Transparent RAII wrapper around a file descriptor
+    class fd {
+        int value = -1;
+    public:
+        explicit fd(int fd) noexcept : value(fd) {}
+        fd(const fd&) = delete;
+        fd(fd&& o) noexcept { std::swap(value, o.value); }
+        ~fd() noexcept { if (value != -1) { ::close(value); } }
+        operator int() const& { return value; }
+        operator int() && = delete;
+        explicit operator bool() const& { return value != -1; }
+        int release() { int ret = -1; std::swap(ret, value); return ret; }
+    };
+
     // Returns number of bytes written (may be zero)
     inline size_t write(int fd, std::string_view data) {
-        ssize_t n_sent = ::send(fd, data.data(), data.size(), MSG_NOSIGNAL);
+        ssize_t n_sent = ::write(fd, data.data(), data.size());
         if (n_sent == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return 0;
         } else if (n_sent == -1 && errno == EPIPE) {
             throw eof();
         }
-        ex::wrape(n_sent, "send()");
+        ex::wrape(n_sent, "write()");
         return n_sent;
     }
     // Returns number of bytes read (may be zero)
     inline size_t read(int fd, void* buf, size_t size) {
-        ssize_t n_read = ::recv(fd, buf, size, MSG_NOSIGNAL);
+        ssize_t n_read = ::read(fd, buf, size);
         if (n_read == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             return 0;
         } else if (n_read == 0) {
             throw eof();
         }
-        ex::wrape(n_read, "recv()");
+        ex::wrape(n_read, "read()");
         return n_read;
     }
     inline void fcntl(int fd, int cmd, int arg) {
@@ -59,10 +73,28 @@ namespace async::posix::c_api {
     }
     // Returns a non-blocking socket
     [[nodiscard]]
-    inline int socket(int domain, int type, int protocol) {
-        int fd = ex::wrape(::socket(domain, type, protocol), "socket()");
+    inline fd socket(int domain, int type, int protocol) {
+        c_api::fd fd (ex::wrape(::socket(domain, type, protocol), "socket()"));
         c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
         return fd;
+    }
+    // Returns a non-blocking fd
+    [[nodiscard]]
+    inline fd open(const char* pathname, int flags, mode_t mode = 00666) {
+        c_api::fd fd {ex::wrape(::open(pathname, flags, mode), "open()")};
+        c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
+        return fd;
+    }
+    // Returns a non-blocking fd
+    [[nodiscard]]
+    inline fd creat(const char* pathname, mode_t mode = 00666) {
+        c_api::fd fd {ex::wrape(::creat(pathname, mode), "creat()")};
+        c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
+        return fd;
+    }
+    // Optional, use to close a descriptor early
+    inline void close(fd& fd) noexcept {
+        ::close(fd.release());
     }
     [[nodiscard]]
     inline in_addr inet_aton(const char* ip) {
@@ -72,8 +104,8 @@ namespace async::posix::c_api {
     }
     // Returns a non-blocking socket, ip may be nullptr for INADDR_ANY
     [[nodiscard]]
-    inline int bind_listen(const char* ip, uint16_t port) {
-        int fd = c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    inline fd bind_listen(const char* ip, uint16_t port) {
+        c_api::fd fd {c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
         in_addr ia = ip ? c_api::inet_aton(ip) : in_addr{INADDR_ANY};
         sockaddr_in addr = {
             .sin_family = AF_INET,
@@ -87,12 +119,12 @@ namespace async::posix::c_api {
     }
     // Returns accepted socket or -1
     [[nodiscard]]
-    inline int accept(int fd) {
-        int client = ::accept(fd, nullptr, nullptr);
+    inline fd accept(int fd) {
+        c_api::fd client {::accept(fd, nullptr, nullptr)};
         if (client == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return -1;
+            return c_api::fd{-1};
         }
-        ex::wrape(client, "accept()");
+        ex::wrape((int) client, "accept()");
         c_api::fcntl(client, F_SETFL, O_NONBLOCK);
         return client;
     }

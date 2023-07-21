@@ -14,8 +14,9 @@
 
 #include <thread>
 
-#include "Buffer.h"
+#include "posix_wrappers.h"
 
+#include <signal.h>
 
 
 int get_connected_socket() {
@@ -63,40 +64,72 @@ namespace async::detail {
         std::string raw_buffer;
         size_t start = 0;
     };
-    class fd_handle {
-        int fd = -1;
-    public:
-        explicit fd_handle(int fd) noexcept : fd(fd) {}
-        fd_handle(const fd_handle&) = delete;
-        fd_handle(fd_handle&& o) noexcept { std::swap(fd, o.fd); }
-        ~fd_handle() noexcept { if (fd != -1) { close(fd); } }
-        operator int() const { return fd; }
-    };
 }
 
-namespace async::detail {
-    class tcp_stream {
-        task<void> wait_read() { co_await poll_loop.wait_read(fd); }
-        task<void> wait_write() { co_await poll_loop.wait_write(fd); }
-        size_t raw_read(void* buf, size_t size) { return posix::c_api::read(fd, buf, size); }
-        explicit tcp_stream(int fd) : fd(fd) {}
-        detail::fd_handle fd;
-    };
+namespace async {
+    namespace provider {
+        class fd {
+        public:
+            explicit fd(c_api::fd fd_handle) : fd_handle(std::move(fd_handle)) {}
+        protected:
+            task<void> wait_read() { co_await poll_loop.wait_read(fd_handle); }
+            task<void> wait_write() { co_await poll_loop.wait_write(fd_handle); }
+
+            size_t read(void* buf, size_t size) { return c_api::read(fd_handle, buf, size); }
+            size_t write(std::string_view data) { return c_api::write(fd_handle, data); }
+
+            static constexpr bool has_lookahead = true;
+            size_t available_bytes() { return c_api::available_bytes(fd_handle); }
+
+            task<void> close() { c_api::close(fd_handle); co_return; }
+
+        private:
+            c_api::fd fd_handle;
+        };
+
+        class fd_pair {
+        public:
+            explicit fd_pair(c_api::fd read_fd, c_api::fd write_fd)
+                : read_fd(std::move(read_fd))
+                , write_fd(std::move(write_fd))
+            {}
+        protected:
+            task<void> wait_read() { co_await poll_loop.wait_read(read_fd); }
+            task<void> wait_write() { co_await poll_loop.wait_write(write_fd); }
+
+            size_t read(void* buf, size_t size) { return c_api::read(read_fd, buf, size); }
+            size_t write(std::string_view data) { return c_api::write(write_fd, data); }
+
+            static constexpr bool has_lookahead = true;
+            size_t available_bytes() { return c_api::available_bytes(read_fd); }
+
+            task<void> close() { c_api::close(read_fd); c_api::close(write_fd); co_return; }
+
+        private:
+            c_api::fd read_fd, write_fd;
+        };
+    }
 }
 
 namespace async {
 
-    class stream {
+    template <typename Provider>
+    class stream : private Provider {
     public:
         task<size_t> read_some(std::string& out) {
             if (!buffer.empty()) {
                 co_return buffer.dequeue_all(out);
             } else {
-                co_await poll_loop.wait_read(fd);
-                const size_t n_available = posix::c_api::available_bytes(fd);
-                out.resize(out.size() + n_available);
-                size_t n_read = posix::c_api::read(fd, out.data() + out.size() - n_available, n_available);
-                assert(n_read == n_available);
+                co_await Provider::wait_read();
+                size_t buflen;
+                if constexpr (Provider::has_lookahead) {
+                    buflen = Provider::available_bytes();
+                } else {
+                    buflen = 1024;
+                }
+                out.resize(out.size() + buflen);
+                size_t n_read = Provider::read(out.data() + out.size() - buflen, buflen);
+                out.resize(out.size() - buflen + n_read);
                 co_return n_read;
             }
         }
@@ -112,13 +145,28 @@ namespace async {
             out.resize(out.size() + n);
             auto* const end_ptr = out.data() + out.size();
             while (n > 0) {
-                co_await poll_loop.wait_read(fd);
-                n -= posix::c_api::read(fd, end_ptr - n, n);
+                co_await Provider::wait_read();
+                n -= Provider::read(end_ptr - n, n);
             }
         }
         task<std::string> read_n(size_t n) {
             std::string ret;
             co_await read_n(n, ret);
+            co_return ret;
+        }
+        task<void> read_until_eof(std::string& out) {
+            if (!buffer.empty()) {
+                buffer.dequeue_all(out);
+            }
+            try {
+                while (true) {
+                    co_await read_some(out);
+                }
+            } catch (const c_api::eof&) {}
+        }
+        task<std::string> read_until_eof() {
+            std::string ret;
+            co_await read_until_eof(ret);
             co_return ret;
         }
         task<void> read_until(std::string_view substr, std::string& out) {
@@ -142,22 +190,20 @@ namespace async {
             co_return ret;
         }
         task<void> write(std::string_view str) {
-            str = str.substr(posix::c_api::write(fd, str));
+            str = str.substr(Provider::write(str));
             while (!str.empty()) {
-                co_await poll_loop.wait_write(fd);
-                str = str.substr(posix::c_api::write(fd, str));
+                co_await Provider::wait_write();
+                str = str.substr(Provider::write(str));
             }
         }
-        static stream from_fd(int fd) { return stream{fd}; }
+        using Provider::close;
+        stream(Provider provider) : Provider(std::move(provider)) {}
     private:
-        explicit stream(int fd) : fd(fd) {}
-    private:
-        detail::fd_handle fd;
         detail::queue_buffer buffer;
     };
 
-    task<stream> connect(const char* ip, uint16_t port) {
-        int fd = posix::c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    task<stream<provider::fd>> connect(const char* ip, uint16_t port) {
+        c_api::fd fd = c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         in_addr ia;
         if (inet_aton(ip, &ia) == 0) {
             throw ex::runtime("invalid ip address");
@@ -174,60 +220,97 @@ namespace async {
                 throw ex::fn("connect()", strerror(errno));
             }
             co_await poll_loop.wait_write(fd);
-            int err = posix::c_api::getsockopt(fd, SOL_SOCKET, SO_ERROR);
+            int err = c_api::getsockopt(fd, SOL_SOCKET, SO_ERROR);
             if (err != 0) {
                 throw ex::fn("connect()", strerror(err));
             }
         }
-        co_return stream::from_fd(fd);
+        co_return stream(provider::fd(std::move(fd)));
+    }
+
+    task<stream<provider::fd>> open_read(const char* path) {
+        co_return stream(provider::fd(c_api::open(path, O_RDONLY | O_NONBLOCK)));
+    }
+
+    task<stream<provider::fd>> open_write(const char* path, bool append, bool create = true) {
+        int flags = O_WRONLY | O_NONBLOCK;
+        if (append) { flags |= O_APPEND; }
+        if (create) { flags |= O_CREAT | O_TRUNC; }
+        co_return stream(provider::fd(c_api::open(path, flags)));
+    }
+
+    task<stream<provider::fd_pair>> open_rw(const char* read_path, const char* write_path, bool append, bool create = true) {
+        int flags = O_WRONLY | O_NONBLOCK;
+        if (append) { flags |= O_APPEND; }
+        if (create) { flags |= O_CREAT | O_TRUNC; }
+        c_api::fd read_fd = c_api::open(read_path, O_RDONLY | O_NONBLOCK);
+        c_api::fd write_fd = c_api::open(write_path, flags);
+        co_return stream(provider::fd_pair(std::move(read_fd), std::move(write_fd)));
+    }
+
+    task<std::string> slurp(const char* path) {
+        stream stream = co_await open_read(path);
+        co_return co_await stream.read_until_eof();
     }
 
     class server {
     public:
-        task<stream> accept() {
+        task<stream<provider::fd>> accept() {
             co_await poll_loop.wait_read(server_fd);
-            int client_fd = posix::c_api::accept(server_fd);
-            assert(client_fd != -1);
-            co_return stream::from_fd(client_fd);
+            co_return stream(provider::fd(c_api::accept(server_fd)));
         }
-        static server from_fd(int fd) { return server{fd}; }
+        static server from_fd(c_api::fd fd) { return server{std::move(fd)}; }
     private:
-        explicit server(int fd) : server_fd(fd) {}
+        explicit server(c_api::fd fd) : server_fd(std::move(fd)) {}
     private:
-        detail::fd_handle server_fd;
+        c_api::fd server_fd;
     };
 
     task<server> listen(const char* ip, uint16_t port) {
-        int fd = posix::c_api::bind_listen(ip, port);
-        co_return server::from_fd(fd);
+        co_return server::from_fd(c_api::bind_listen(ip, port));
     }
 }
 
-task<void> foo() {
-    prn("foo() start");
-    auto stream = co_await async::connect("93.184.216.34", 80);
-    prn("connected.");
+task<void> test_client() {
+    async::stream stream = co_await async::connect("93.184.216.34", 80);
+    prn("client connected.");
     co_await stream.write("HEAD / HTTP/1.1\r\nHost:example.com\r\nConnection:close\r\n\r\n");
     auto buf = co_await stream.read_until("\r\n\r\n");
-    prn(buf);
-    prn("foo() end");
+    prn("client:", buf);
     co_return;
 }
 
-struct some_resource {
-    some_resource() { prn("ctor"); }
-    ~some_resource() { prn("dtor"); }
-};
+task<void> test_file_read() {
+    prn(co_await async::slurp("/etc/hosts"));
+}
 
-task<void> bar() {
-    some_resource r;
-    co_await std::suspend_always();
+task<void> test_file_write() {
+    async::stream stream = co_await async::open_write("foo", false);
+    co_await stream.write("bar\n");
+    co_await stream.close();
+    assert(co_await async::slurp("foo") == "bar\n");
+}
+
+task<void> test_file_rw() {
+    async::stream stream = co_await async::open_rw("foo", "bar", false);
+    co_await stream.write("baz\n");
+    assert(co_await stream.read_until_eof() == "bar\n");
+    co_await stream.close();
+    assert(co_await async::slurp("bar") == "baz\n");
+}
+
+task<void> coro_main() {
+    // co_await test_client();
+    // co_await test_file_read();
+    // co_await test_file_write();
+    // co_await test_file_rw();
+    co_return;
 }
 
 int main() {
+    signal(SIGPIPE, SIG_IGN);
     // std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    auto task = foo();
-    rethrow_task(task);
+    auto task = coro_main();
     while (poll_loop.has_tasks()) {
         dp("MAIN LOOP");
         poll_loop.think();
