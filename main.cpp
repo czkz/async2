@@ -18,6 +18,8 @@
 
 #include <signal.h>
 
+#include <unordered_map>
+
 
 int get_connected_socket() {
     int sfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -204,10 +206,7 @@ namespace async {
 
     task<stream<provider::fd>> connect(const char* ip, uint16_t port) {
         c_api::fd fd = c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        in_addr ia;
-        if (inet_aton(ip, &ia) == 0) {
-            throw ex::runtime("invalid ip address");
-        }
+        in_addr ia = c_api::inet_pton(AF_INET, ip);
         sockaddr_in addr = {
             .sin_family = AF_INET,
             .sin_port = htons(port),
@@ -299,11 +298,51 @@ task<void> test_file_rw() {
     assert(co_await async::slurp("bar") == "baz\n");
 }
 
+namespace async {
+    task<std::unordered_map<size_t, in_addr>> parse_hosts() {
+        async::stream stream = co_await async::open_read("/etc/hosts");
+        std::unordered_map<size_t, in_addr> host_to_ip;
+        try {
+            std::vector<std::string_view> words;
+            words.reserve(4);
+            while (true) {
+                std::string line = co_await stream.read_until("\n");
+                static constexpr auto isws = [](char c) { return c == ' ' || c == '\t'; };
+                static constexpr auto iseol = [](char c) { return c == '#' || c == '\n'; };
+                static constexpr auto isw = [](char c) { return !isws(c) && !iseol(c); };
+                size_t i = 0;
+                while (true) {
+                    // Line ends with \n, which is never stepped over
+                    // in loops, so it's not nessesary to check that i < line.size()
+                    while (isws(line[i])) { i++; }
+                    if (iseol(line[i])) { break; }
+                    size_t start_i = i;
+                    while (isw(line[i])) { i++; }
+                    words.push_back(std::string_view(line).substr(start_i, i - start_i));
+                }
+                if (words.size() > 1) {
+                    line[words[0].size()] = '\0';
+                    assert(words[0].size() == std::string_view(words[0].data()).size());
+                    try {
+                        in_addr ip = c_api::inet_pton(AF_INET, words[0].data());
+                        for (size_t i = 1; i < words.size(); i++) {
+                            host_to_ip.emplace(std::hash<std::string_view>{}(words[i]), ip);
+                        }
+                    } catch (const std::exception&) {}
+                }
+                words.clear();
+            }
+        } catch (const async::c_api::eof&) {}
+        co_return host_to_ip;
+    }
+}
+
 task<void> coro_main() {
     // co_await test_client();
     // co_await test_file_read();
     // co_await test_file_write();
     // co_await test_file_rw();
+    co_await async::parse_hosts();
     co_return;
 }
 

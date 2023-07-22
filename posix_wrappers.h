@@ -97,16 +97,28 @@ namespace async::c_api {
         ::close(fd.release());
     }
     [[nodiscard]]
-    inline in_addr inet_aton(const char* ip) {
+    inline in_addr inet_pton(int af, const char* ip) {
         in_addr ret;
-        ex::wrapb(::inet_aton(ip, &ret), "inet_aton()");
+        int res = ::inet_pton(af, ip, &ret);
+        if (res == 0) {
+            throw ex::fn("inet_pton()");
+        } else if (res == -1) {
+            throw ex::fn("inet_pton()", strerror(errno));
+        }
+        return ret;
+    }
+    [[nodiscard]]
+    inline std::string inet_ntop(int af, in_addr ip) {
+        std::string ret;
+        ret.resize(af == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN);
+        ex::wrapb(::inet_ntop(af, &ip, ret.data(), ret.size()), "inet_ntop()");
         return ret;
     }
     // Returns a non-blocking socket, ip may be nullptr for INADDR_ANY
     [[nodiscard]]
     inline fd bind_listen(const char* ip, uint16_t port) {
         c_api::fd fd {c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
-        in_addr ia = ip ? c_api::inet_aton(ip) : in_addr{INADDR_ANY};
+        in_addr ia = ip ? c_api::inet_pton(AF_INET, ip) : in_addr{INADDR_ANY};
         sockaddr_in addr = {
             .sin_family = AF_INET,
             .sin_port = htons(port),
