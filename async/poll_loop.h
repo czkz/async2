@@ -21,7 +21,7 @@ private:
     std::vector<pollfd> pfds;
 };
 
-inline poll_loop_t poll_loop;
+inline thread_local poll_loop_t poll_loop;
 
 
 struct poll_loop_t::awaiter {

@@ -80,15 +80,15 @@ namespace async::c_api {
     }
     // Returns a non-blocking fd
     [[nodiscard]]
-    inline fd open(const char* pathname, int flags, mode_t mode = 00666) {
-        c_api::fd fd {ex::wrape(::open(pathname, flags, mode), "open()")};
+    inline fd open(std::string_view pathname, int flags, mode_t mode = 00666) {
+        c_api::fd fd {ex::wrape(::open(std::string(pathname).c_str(), flags, mode), "open()")};
         c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
         return fd;
     }
     // Returns a non-blocking fd
     [[nodiscard]]
-    inline fd creat(const char* pathname, mode_t mode = 00666) {
-        c_api::fd fd {ex::wrape(::creat(pathname, mode), "creat()")};
+    inline fd creat(std::string_view pathname, mode_t mode = 00666) {
+        c_api::fd fd {ex::wrape(::creat(std::string(pathname).c_str(), mode), "creat()")};
         c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
         return fd;
     }
@@ -97,9 +97,9 @@ namespace async::c_api {
         ::close(fd.release());
     }
     [[nodiscard]]
-    inline in_addr inet_pton(int af, const char* ip) {
+    inline in_addr inet_pton(int af, std::string_view ip) {
         in_addr ret;
-        int res = ::inet_pton(af, ip, &ret);
+        int res = ::inet_pton(af, std::string(ip).c_str(), &ret);
         if (res == 0) {
             throw ex::fn("inet_pton()");
         } else if (res == -1) {
@@ -108,17 +108,29 @@ namespace async::c_api {
         return ret;
     }
     [[nodiscard]]
+    inline uint32_t inet_ptoh(int af, std::string_view ip) {
+        return ntohl(c_api::inet_pton(af, std::string(ip).c_str()).s_addr);
+    }
+    [[nodiscard]]
     inline std::string inet_ntop(int af, in_addr ip) {
         std::string ret;
         ret.resize(af == AF_INET ? INET_ADDRSTRLEN : INET6_ADDRSTRLEN);
-        ex::wrapb(::inet_ntop(af, &ip, ret.data(), ret.size()), "inet_ntop()");
-        return ret;
+        bool res = ::inet_ntop(af, &ip, ret.data(), ret.size());
+        if (res == 0) {
+            throw ex::fn("inet_ntop()", strerror(errno));
+        }
+        // Trim to null byte
+        return std::string(ret.c_str());
+    }
+    [[nodiscard]]
+    inline std::string inet_htop(int af, uint32_t ip) {
+        return c_api::inet_ntop(af, in_addr{htonl(ip)});
     }
     // Returns a non-blocking socket, ip may be nullptr for INADDR_ANY
     [[nodiscard]]
-    inline fd bind_listen(const char* ip, uint16_t port) {
+    inline fd bind_listen(std::string_view ip, uint16_t port) {
         c_api::fd fd {c_api::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
-        in_addr ia = ip ? c_api::inet_pton(AF_INET, ip) : in_addr{INADDR_ANY};
+        in_addr ia = (ip == "0.0.0.0") ? c_api::inet_pton(AF_INET, ip) : in_addr{INADDR_ANY};
         sockaddr_in addr = {
             .sin_family = AF_INET,
             .sin_port = htons(port),
