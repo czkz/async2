@@ -4,7 +4,7 @@
 #include <dns.h>
 #include <unordered_map>
 
-namespace async::detail::conf_parsing {
+namespace async::dns::detail::conf_parsing {
     inline constexpr bool is_ws(char c) {
         return c == ' ' || c == '\t';
     }
@@ -35,7 +35,7 @@ namespace async::detail::conf_parsing {
     }
 }
 
-namespace async {
+namespace async::dns::detail {
     inline task<std::string> parse_resolvconf() {
         async::stream stream = co_await async::open_read("/etc/resolv.conf");
         std::vector<std::string> ips;
@@ -78,6 +78,11 @@ namespace async {
         } catch (const async::c_api::eof&) {}
         co_return host_to_ip;
     }
+
+    // Initialized and updated in host_to_ip()
+    inline thread_local bool cache_has_etchosts = false;
+    inline thread_local std::unordered_map<size_t, std::string> dns_cache;
+    inline thread_local std::string resolvconf_dns_server_ip;
 }
 
 namespace async::dns {
@@ -92,11 +97,6 @@ namespace async::dns {
         }
     }
 
-    // Initialized and updated in host_to_ip()
-    inline thread_local bool cache_has_etchosts = false;
-    inline thread_local std::unordered_map<size_t, std::string> dns_cache;
-    inline thread_local std::string resolvconf_dns_server_ip;
-
     inline task<std::string> host_to_ip(std::string_view host, std::optional<std::string_view> dns_server_ip = std::nullopt) {
         // Return as is if host is already an ip address
         try {
@@ -105,23 +105,23 @@ namespace async::dns {
         } catch (std::exception&) {}
 
         // Initialize thread_local
-        if (!cache_has_etchosts) {
-            dns_cache.merge(co_await parse_hosts());
-            cache_has_etchosts = true;
+        if (!detail::cache_has_etchosts) {
+            detail::dns_cache.merge(co_await detail::parse_hosts());
+            detail::cache_has_etchosts = true;
         }
 
         // Lookup in cache
         auto host_hash = std::hash<std::string_view>{}(host);
-        auto iter = dns_cache.find(host_hash);
-        if (iter != dns_cache.end()) {
+        auto iter = detail::dns_cache.find(host_hash);
+        if (iter != detail::dns_cache.end()) {
             co_return iter->second;
         }
 
         if (!dns_server_ip) {
-            if (resolvconf_dns_server_ip.empty()) { // Initialize thread_local 
-                resolvconf_dns_server_ip = co_await parse_resolvconf();
+            if (detail::resolvconf_dns_server_ip.empty()) { // Initialize thread_local 
+                detail::resolvconf_dns_server_ip = co_await detail::parse_resolvconf();
             }
-            dns_server_ip = resolvconf_dns_server_ip.c_str();
+            dns_server_ip = detail::resolvconf_dns_server_ip.c_str();
         }
 
         // Make a DNS request
@@ -136,16 +136,16 @@ namespace async::dns {
         }
         if (ip == -1u) { throw ex::runtime("no valid answers in DNS response"); }
         std::string ip_str = c_api::inet_htop(AF_INET, ip);
-        dns_cache.emplace(host_hash, ip_str);
+        detail::dns_cache.emplace(host_hash, ip_str);
         co_return ip_str;
     }
 
     inline task<std::optional<std::string>> ip_to_host(std::string_view ip, std::optional<std::string_view> dns_server_ip = std::nullopt) {
         if (!dns_server_ip) {
-            if (resolvconf_dns_server_ip.empty()) { // Initialize thread_local 
-                resolvconf_dns_server_ip = co_await parse_resolvconf();
+            if (detail::resolvconf_dns_server_ip.empty()) { // Initialize thread_local 
+                detail::resolvconf_dns_server_ip = co_await detail::parse_resolvconf();
             }
-            dns_server_ip = resolvconf_dns_server_ip;
+            dns_server_ip = detail::resolvconf_dns_server_ip;
         }
         ::dns::packet_t req = ::dns::reverse_query(ip);
         ::dns::packet_t resp = co_await dns_query(*dns_server_ip, req);
