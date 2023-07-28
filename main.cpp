@@ -11,7 +11,7 @@
 #include <signal.h>
 
 
-task<void> test_client() {
+async::task<void> test_client() {
     async::stream stream = co_await async::connect("93.184.216.34", 80);
     prn("client connected.");
     co_await stream.write("HEAD / HTTP/1.1\r\nHost:example.com\r\nConnection:close\r\n\r\n");
@@ -20,19 +20,19 @@ task<void> test_client() {
     co_return;
 }
 
-task<void> test_file_read() {
+async::task<void> test_file_read() {
     co_await async::slurp("/etc/hosts");
     prn("file_read done.");
 }
 
-task<void> test_file_write() {
+async::task<void> test_file_write() {
     async::stream stream = co_await async::open_write("foo", false);
     co_await stream.write("bar\n");
     co_await stream.close();
     assert(co_await async::slurp("foo") == "bar\n");
 }
 
-task<void> test_file_rw() {
+async::task<void> test_file_rw() {
     async::stream stream = co_await async::open_rw("foo", "bar", false);
     co_await stream.write("baz\n");
     assert(co_await stream.read_until_eof() == "bar\n");
@@ -40,14 +40,14 @@ task<void> test_file_rw() {
     assert(co_await async::slurp("bar") == "baz\n");
 }
 
-task<void> test_dns() {
+async::task<void> test_dns() {
     std::string ip = co_await async::dns::host_to_ip("pie.dev");
     prn("dns:", ip);
     prn("dns reverse:", (co_await async::dns::ip_to_host(ip.c_str())).value_or("<not found>"));
     co_return;
 }
 
-task<void> test_gather() {
+async::task<void> test_gather() {
     co_await gather_void(
         test_client(),
         test_file_read(),
@@ -58,7 +58,7 @@ task<void> test_gather() {
     // prn("Gathered", x, y);
 }
 
-task<void> coro_main() {
+async::task<void> coro_main() {
     co_await test_gather();
     co_return;
 }
