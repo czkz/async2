@@ -16,12 +16,13 @@ task<void> test_client() {
     prn("client connected.");
     co_await stream.write("HEAD / HTTP/1.1\r\nHost:example.com\r\nConnection:close\r\n\r\n");
     auto buf = co_await stream.read_until("\r\n\r\n");
-    prn("client:", buf);
+    prn("client done.");
     co_return;
 }
 
 task<void> test_file_read() {
-    prn(co_await async::slurp("/etc/hosts"));
+    co_await async::slurp("/etc/hosts");
+    prn("file_read done.");
 }
 
 task<void> test_file_write() {
@@ -41,17 +42,24 @@ task<void> test_file_rw() {
 
 task<void> test_dns() {
     std::string ip = co_await async::dns::host_to_ip("pie.dev");
-    prn("Result:", ip);
-    prn("Result2:", (co_await async::dns::ip_to_host(ip.c_str())).value_or("<not found>"));
+    prn("dns:", ip);
+    prn("dns reverse:", (co_await async::dns::ip_to_host(ip.c_str())).value_or("<not found>"));
     co_return;
 }
 
+task<void> test_gather() {
+    co_await gather_void(
+        test_client(),
+        test_file_read(),
+        // test_file_write(),
+        // test_file_rw(),
+        test_dns()
+    );
+    // prn("Gathered", x, y);
+}
+
 task<void> coro_main() {
-    co_await test_client();
-    co_await test_file_read();
-    co_await test_file_write();
-    co_await test_file_rw();
-    co_await test_dns();
+    co_await test_gather();
     co_return;
 }
 
@@ -60,11 +68,12 @@ int main() {
     // std::this_thread::sleep_for(std::chrono::milliseconds(500));
     auto task = coro_main();
     while (poll_loop.has_tasks()) {
-        prn("MAIN LOOP");
+        prn(">>>");
         poll_loop.think();
-        prn("MAIN LOOP END");
+        prn(">>>\n");
     }
     rethrow_task(task);
     prn("main end");
     task.handle.destroy();
+    task.was_awaited = true;
 }

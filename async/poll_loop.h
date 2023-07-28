@@ -17,6 +17,7 @@ struct poll_loop_t {
     bool has_tasks() const { return !suspended.empty(); }
 
 private:
+    void swap_remove(size_t i);
     std::vector<std::coroutine_handle<>> suspended;
     std::vector<pollfd> pfds;
 };
@@ -67,15 +68,16 @@ inline void poll_loop_t::think() {
         for (size_t i = 0; i < suspended.size(); i++) {
             if (pfds[i].revents != 0) {
                 suspended[i].resume();
-
-                std::swap(suspended[i], suspended.back());
-                std::swap(pfds[i], pfds.back());
-                suspended.pop_back();
-                pfds.pop_back();
-                i--;
-
+                swap_remove(i--);
                 if (--n_left == 0) { break; }
             }
         }
     }
+}
+
+inline void poll_loop_t::swap_remove(size_t i) {
+    std::swap(suspended[i], suspended.back());
+    std::swap(pfds[i], pfds.back());
+    suspended.pop_back();
+    pfds.pop_back();
 }

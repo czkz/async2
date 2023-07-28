@@ -1,7 +1,10 @@
 #pragma once
+#include <cassert>
 #include <coroutine>
+#include <tuple>
 #include <variant>
 #include <exception>
+#include <stdexcept>
 
 class suspend_when {
     bool suspend;
@@ -17,10 +20,26 @@ class task {
 public:
     struct promise_type;
     struct awaiter;
-    awaiter operator co_await() { was_awaited = true; return awaiter{handle}; }
-    // ~task() { if (!was_awaited) { this->handle.destroy(); } }
+    awaiter operator co_await() {
+        assert(!was_awaited);
+        was_awaited = true;
+        return awaiter{handle};
+    }
+
+    task(const task&) = delete;
+    task(task&& o) {
+        std::swap(handle, o.handle);
+        std::swap(was_awaited, o.was_awaited);
+    }
+    ~task() {
+        if (handle && !was_awaited) {
+            try {
+                throw std::runtime_error("task was not awaited");
+            } catch (const std::exception&) { std::terminate(); }
+        }
+    }
 // private:
-    friend void rethrow_task(task<void>);
+    friend void rethrow_task(const task<void>&);
     explicit task(std::coroutine_handle<promise_type> h) : handle(h) {}
     std::coroutine_handle<promise_type> handle;
     bool was_awaited = false;
@@ -37,6 +56,7 @@ struct promise_base {
 
 template <typename T>
 struct task<T>::promise_type : public promise_base {
+    using value_type = T;
     task get_return_object() { return task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
     void unhandled_exception() noexcept {
         this->result.template emplace<2>(std::current_exception());
@@ -73,6 +93,7 @@ struct task<T>::awaiter {
 
 template <>
 struct task<void>::promise_type : public promise_base {
+    using value_type = void;
     task get_return_object() { return task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
     void unhandled_exception() noexcept {
         this->exception = std::current_exception();
@@ -99,9 +120,27 @@ struct task<void>::awaiter {
     std::coroutine_handle<promise_type> handle;
 };
 
-inline void rethrow_task(task<void> t) {
+inline void rethrow_task(const task<void>& t) {
     auto& exception = t.handle.promise().exception;
     if (exception) {
         std::rethrow_exception(exception);
     }
+}
+
+template <typename Promise = void>
+struct this_task_handle {
+    bool await_ready() { return false; }
+    bool await_suspend(std::coroutine_handle<Promise> h) { ret = h; return false; }
+    std::coroutine_handle<Promise> await_resume() { return ret; }
+    std::coroutine_handle<Promise> ret;
+};
+
+template <typename... Tasks>
+auto gather(Tasks... tasks) -> task<std::tuple<typename Tasks::promise_type::value_type...>> {
+    co_return std::make_tuple(co_await tasks...);
+}
+
+template <typename... Tasks>
+task<void> gather_void(Tasks... tasks) {
+    (void) ((co_await tasks), ...);
 }

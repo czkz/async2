@@ -189,7 +189,6 @@ namespace dns::detail {
         }
         [[nodiscard]]
         uint32_t dword() {
-            checklen(4);
             uint8_t b0 = byte();
             uint8_t b1 = byte();
             uint8_t b2 = byte();
