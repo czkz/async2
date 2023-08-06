@@ -20,7 +20,7 @@ namespace async {
 namespace async {
     inline task<stream<provider::fd>> connect(std::string_view host, uint16_t port) {
         std::string ip = co_await dns::host_to_ip(host);
-        c_api::fd fd = co_await detail::make_connected_socket(ip.c_str(), port, SOCK_STREAM, IPPROTO_TCP);
+        c_api::fd fd = co_await detail::make_connected_socket(ip, port, SOCK_STREAM, IPPROTO_TCP);
         co_return stream(provider::fd(std::move(fd)));
     }
 
