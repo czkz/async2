@@ -1,6 +1,5 @@
 #pragma once
 #include "coro.h"
-#include "poll_loop.h"
 #include "posix_wrappers.h"
 
 namespace async::detail {
@@ -36,99 +35,25 @@ namespace async::detail {
         std::string raw_buffer;
         size_t start = 0;
     };
-
-    inline task<c_api::fd> make_connected_socket(std::string_view ip, uint16_t port, int type, int protocol) {
-        c_api::fd fd = c_api::socket(AF_INET, type, protocol);
-        sockaddr_in addr = {
-            .sin_family = AF_INET,
-            .sin_port = htons(port),
-            .sin_addr = c_api::inet_pton(AF_INET, ip),
-            .sin_zero = {},
-        };
-        int res = ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-        if (res == -1) {
-            if (errno != EINPROGRESS) {
-                throw ex::fn("connect()", strerror(errno));
-            }
-            co_await poll_loop.wait_write(fd);
-            int err = c_api::getsockopt(fd, SOL_SOCKET, SO_ERROR);
-            if (err != 0) {
-                throw ex::fn("connect()", strerror(err));
-            }
-        }
-        co_return fd;
-    }
-}
-
-namespace async::provider {
-    class fd {
-    public:
-        explicit fd(c_api::fd fd_handle) : fd_handle(std::move(fd_handle)) {}
-
-        static constexpr bool stream_oriented = true;
-        static constexpr bool has_lookahead = true;
-
-    protected:
-        task<void> wait_read() { co_await poll_loop.wait_read(fd_handle); }
-        task<void> wait_write() { co_await poll_loop.wait_write(fd_handle); }
-
-        size_t read(void* buf, size_t size) { return c_api::read(fd_handle, buf, size); }
-        size_t write(std::string_view data) { return c_api::write(fd_handle, data); }
-
-        task<void> close() { c_api::close(fd_handle); co_return; }
-
-        // Available only if has_lookahead
-        size_t available_bytes() { return c_api::available_bytes(fd_handle); }
-
-    private:
-        c_api::fd fd_handle;
-    };
-
-    class fd_pair {
-    public:
-        explicit fd_pair(c_api::fd read_fd, c_api::fd write_fd)
-            : read_fd(std::move(read_fd))
-            , write_fd(std::move(write_fd))
-        {}
-
-        static constexpr bool stream_oriented = true;
-        static constexpr bool has_lookahead = true;
-
-    protected:
-        task<void> wait_read() { co_await poll_loop.wait_read(read_fd); }
-        task<void> wait_write() { co_await poll_loop.wait_write(write_fd); }
-
-        size_t read(void* buf, size_t size) { return c_api::read(read_fd, buf, size); }
-        size_t write(std::string_view data) { return c_api::write(write_fd, data); }
-
-        task<void> close() { c_api::close(read_fd); c_api::close(write_fd); co_return; }
-
-        // Available only if has_lookahead
-        size_t available_bytes() { return c_api::available_bytes(read_fd); }
-
-    private:
-        c_api::fd read_fd, write_fd;
-    };
 }
 
 namespace async {
-    template <typename Provider>
-    class stream : private Provider {
-        static_assert(Provider::stream_oriented == true);
+    template <typename Transport>
+    class stream {
     public:
         task<size_t> read_some(std::string& out) {
             if (!buffer.empty()) {
                 co_return buffer.dequeue_all(out);
             } else {
-                co_await Provider::wait_read();
+                co_await transport.wait_read();
                 size_t buflen;
-                if constexpr (Provider::has_lookahead) {
-                    buflen = Provider::available_bytes();
+                if constexpr (transport.has_lookahead) {
+                    buflen = transport.available_bytes();
                 } else {
                     buflen = 1024;
                 }
                 out.resize(out.size() + buflen);
-                size_t n_read = Provider::read(out.data() + out.size() - buflen, buflen);
+                size_t n_read = transport.read(out.data() + out.size() - buflen, buflen);
                 out.resize(out.size() - buflen + n_read);
                 co_return n_read;
             }
@@ -145,8 +70,8 @@ namespace async {
             out.resize(out.size() + n);
             auto* const end_ptr = out.data() + out.size();
             while (n > 0) {
-                co_await Provider::wait_read();
-                n -= Provider::read(end_ptr - n, n);
+                co_await transport.wait_read();
+                n -= transport.read(end_ptr - n, n);
             }
         }
         task<std::string> read_n(size_t n) {
@@ -189,37 +114,48 @@ namespace async {
             co_await read_until(substr, ret);
             co_return ret;
         }
-        task<void> write(std::string_view str) {
-            str = str.substr(Provider::write(str));
-            while (!str.empty()) {
-                co_await Provider::wait_write();
-                str = str.substr(Provider::write(str));
+        task<void> write(std::string_view data) {
+            data = data.substr(transport.write(data));
+            while (!data.empty()) {
+                co_await transport.wait_write();
+                data = data.substr(transport.write(data));
             }
         }
-        using Provider::close;
-        stream(Provider provider) : Provider(std::move(provider)) {}
+        task<void> flush() { co_await transport.flush(); }
+        task<void> close() { co_await transport.close(); }
+        stream(Transport transport) : transport(std::move(transport)) {}
+
+        Transport transport;
     private:
         detail::queue_buffer buffer;
     };
 
-    template <typename Provider>
-    class msgstream : private Provider {
-        static_assert(Provider::stream_oriented == false);
+    template <typename Transport>
+    class msgstream {
     public:
         task<std::string> read() {
             std::string ret;
-            ret.resize(Provider::packet_size());
-            co_await Provider::wait_read();
-            size_t n_read = Provider::read(ret.data(), ret.size());
+            co_await transport.wait_read();
+            if constexpr (transport.has_lookahead) {
+                ret.resize(transport.available_bytes());
+            } else {
+                ret.resize(transport.max_incoming_packet_size);
+            }
+            size_t n_read = transport.read(ret.data(), ret.size());
             ret.resize(n_read);
             co_return ret;
         }
-        task<void> write(std::string_view str) {
-            co_await Provider::wait_write();
-            size_t n_sent = Provider::write(str);
-            assert(n_sent == str.size());
+        task<void> write(std::string_view data) {
+            if (data.size() > transport.max_outgoing_packet_size) {
+                throw ex::runtime("data size exceeds maximum packet size");
+            }
+            co_await transport.wait_write();
+            size_t n_sent = transport.write(data);
+            assert(n_sent == data.size());
         }
-        using Provider::close;
-        msgstream(Provider provider) : Provider(std::move(provider)) {}
+        task<void> close() { co_await transport.close(); }
+        msgstream(Transport transport) : transport(std::move(transport)) {}
+
+        Transport transport;
     };
 }

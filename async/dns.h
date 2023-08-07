@@ -79,7 +79,7 @@ namespace async::dns::detail {
         co_return host_to_ip;
     }
 
-    // Initialized and updated in host_to_ip()
+    // Initialized and updated in host_to_ip() and ip_to_host()
     inline thread_local bool cache_has_etchosts = false;
     inline thread_local std::unordered_map<size_t, std::string> dns_cache;
     inline thread_local std::string resolvconf_dns_server_ip;
