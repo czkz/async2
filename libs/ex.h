@@ -27,7 +27,7 @@ namespace ex {
         explicit runtime(const char* msg)
             : msg(msg) {}
         explicit runtime(const char* msg, int code)
-            : msg(fmt_raw(msg, '(', code, ')')) {}
+            : msg(fmt_raw(msg, " (", code, ')')) {}
         virtual const char* what() const noexcept override { return msg.data(); }
     };
 

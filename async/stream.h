@@ -2,41 +2,6 @@
 #include "coro.h"
 #include "posix_wrappers.h"
 
-namespace async::detail {
-    class queue_buffer {
-    public:
-        void enqueue(std::string_view s) {
-            raw_buffer.append(s);
-        }
-        size_t dequeue(size_t n, std::string& out) {
-            std::string_view buf = buffer();
-            out.append(buf.substr(0, n));
-            start += n;
-            if (start >= raw_buffer.size()) {
-                raw_buffer.clear();
-                start = 0;
-            }
-            return std::min(n, buf.size());
-        }
-        size_t dequeue_all(std::string& out) {
-            std::string_view buf = buffer();
-            out.append(buf);
-            raw_buffer.clear();
-            start = 0;
-            return buf.size();
-        }
-        bool empty() const {
-            return raw_buffer.empty();
-        }
-    private:
-        std::string_view buffer() const {
-            return std::string_view{raw_buffer}.substr(start);
-        }
-        std::string raw_buffer;
-        size_t start = 0;
-    };
-}
-
 namespace async {
     template <typename Transport>
     class stream {
@@ -115,6 +80,10 @@ namespace async {
             co_return ret;
         }
         task<void> write(std::string_view data) {
+            co_await write_part(data);
+            co_await flush();
+        }
+        task<void> write_part(std::string_view data) {
             data = data.substr(transport.write(data));
             while (!data.empty()) {
                 co_await transport.wait_write();
@@ -127,7 +96,40 @@ namespace async {
 
         Transport transport;
     private:
-        detail::queue_buffer buffer;
+        class queue_buffer {
+        public:
+            void enqueue(std::string_view s) {
+                raw_buffer.append(s);
+            }
+            size_t dequeue(size_t n, std::string& out) {
+                std::string_view buf = buffer();
+                out.append(buf.substr(0, n));
+                start += n;
+                if (start >= raw_buffer.size()) {
+                    raw_buffer.clear();
+                    start = 0;
+                }
+                return std::min(n, buf.size());
+            }
+            size_t dequeue_all(std::string& out) {
+                std::string_view buf = buffer();
+                out.append(buf);
+                raw_buffer.clear();
+                start = 0;
+                return buf.size();
+            }
+            bool empty() const {
+                return raw_buffer.empty();
+            }
+        private:
+            std::string_view buffer() const {
+                return std::string_view{raw_buffer}.substr(start);
+            }
+            std::string raw_buffer;
+            size_t start = 0;
+        };
+    private:
+        queue_buffer buffer;
     };
 
     template <typename Transport>

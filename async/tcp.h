@@ -30,12 +30,12 @@ namespace async::transport {
     };
 }
 
-namespace async {
+namespace async::tcp {
     class server {
     public:
-        task<stream<transport::tcp_socket>> accept() {
+        task<transport::tcp_socket> accept() {
             co_await poll_loop.wait_read(server_fd);
-            co_return stream(transport::tcp_socket(c_api::accept(server_fd)));
+            co_return transport::tcp_socket(c_api::accept(server_fd));
         }
         static server from_fd(c_api::fd fd) { return server{std::move(fd)}; }
     private:
@@ -44,11 +44,11 @@ namespace async {
         c_api::fd server_fd;
     };
 
-    inline task<stream<transport::tcp_socket>> connect(std::string_view host, uint16_t port) {
+    inline task<transport::tcp_socket> connect(std::string_view host, uint16_t port) {
         std::string ip = co_await dns::host_to_ip(host);
         c_api::fd fd = co_await detail::make_connected_socket(ip, port, SOCK_STREAM, IPPROTO_TCP);
         c_api::setsockopt(fd, IPPROTO_TCP, TCP_CORK, 1);
-        co_return stream(transport::tcp_socket(std::move(fd)));
+        co_return transport::tcp_socket(std::move(fd));
     }
 
     inline task<server> listen(std::string_view ip, uint16_t port) {

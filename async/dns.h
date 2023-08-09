@@ -23,7 +23,7 @@ namespace async::dns::detail::conf_parsing {
         return s.substr(i0, i - i0);
     }
     inline std::vector<std::string_view> skip_line(std::string_view line) {
-        assert(!line.empty() && line.back() == '\n');
+        assert(line.ends_with('\n'));
         std::vector<std::string_view> ret;
         size_t i = 0;
         while (true) {
@@ -37,7 +37,7 @@ namespace async::dns::detail::conf_parsing {
 
 namespace async::dns::detail {
     inline task<std::string> parse_resolvconf() {
-        async::stream stream = co_await async::open_read("/etc/resolv.conf");
+        stream stream = co_await file::open_read("/etc/resolv.conf");
         std::vector<std::string> ips;
         try {
             while (true) {
@@ -49,7 +49,7 @@ namespace async::dns::detail {
                     for (auto& c : ips.back()) { c = tolower(c); }
                 }
             }
-        } catch (const async::c_api::eof&) {}
+        } catch (const c_api::eof&) {}
         if (ips.empty()) {
             // This is what libc does
             ips.emplace_back("127.0.0.1");
@@ -58,7 +58,7 @@ namespace async::dns::detail {
     }
 
     inline task<std::unordered_map<size_t, std::string>> parse_hosts() {
-        async::stream stream = co_await async::open_read("/etc/hosts");
+        stream stream = co_await file::open_read("/etc/hosts");
         std::unordered_map<size_t, std::string> host_to_ip;
         try {
             while (true) {
@@ -75,19 +75,46 @@ namespace async::dns::detail {
                 }
                 words.clear();
             }
-        } catch (const async::c_api::eof&) {}
+        } catch (const c_api::eof&) {}
         co_return host_to_ip;
     }
 
-    // Initialized and updated in host_to_ip() and ip_to_host()
-    inline thread_local bool cache_has_etchosts = false;
-    inline thread_local std::unordered_map<size_t, std::string> dns_cache;
-    inline thread_local std::string resolvconf_dns_server_ip;
+    class cache_t {
+    public:
+        using cache_table_t = std::unordered_map<size_t, std::string>;
+        task<std::string_view> get_server_ip() {
+            if (dns_server_ip.empty()) {
+                dns_server_ip = co_await detail::parse_resolvconf();
+            }
+            co_return dns_server_ip;
+        }
+        task<std::string> get_cache(size_t host_hash) {
+            if (!has_etchosts) {
+                cache_table.merge(co_await detail::parse_hosts());
+                has_etchosts = true;
+            }
+            auto iter = cache_table.find(host_hash);
+            if (iter != cache_table.end()) {
+                co_return iter->second;
+            }
+            co_return std::string();
+        }
+        void put_cache(size_t host_hash, std::string ip_str) {
+            cache_table.emplace(host_hash, ip_str);
+        }
+    private:
+        std::string dns_server_ip;
+        bool has_etchosts = false;
+        cache_table_t cache_table;
+    };
+
+    // Used in host_to_ip() and ip_to_host()
+    inline thread_local cache_t cache;
 }
 
 namespace async::dns {
     inline task<::dns::packet_t> dns_query(std::string_view ip, const ::dns::packet_t& req) {
-        async::msgstream stream = co_await async::detail::connect_udp_nolookup(ip, 53);
+        msgstream stream = co_await udp::detail::connect_udp_nolookup(ip, 53);
         co_await stream.write(req.str());
         while (true) {
             ::dns::packet_t resp = ::dns::packet_t::from_string(co_await stream.read());
@@ -97,35 +124,8 @@ namespace async::dns {
         }
     }
 
-    inline task<std::string> host_to_ip(std::string_view host, std::optional<std::string_view> dns_server_ip = std::nullopt) {
-        // Return as is if host is already an ip address
-        try {
-            (void) c_api::inet_pton(AF_INET, host);
-            co_return std::string(host);
-        } catch (std::exception&) {}
-
-        // Initialize thread_local
-        if (!detail::cache_has_etchosts) {
-            detail::dns_cache.merge(co_await detail::parse_hosts());
-            detail::cache_has_etchosts = true;
-        }
-
-        // Lookup in cache
-        auto host_hash = std::hash<std::string_view>{}(host);
-        auto iter = detail::dns_cache.find(host_hash);
-        if (iter != detail::dns_cache.end()) {
-            co_return iter->second;
-        }
-
-        if (!dns_server_ip) {
-            if (detail::resolvconf_dns_server_ip.empty()) { // Initialize thread_local 
-                detail::resolvconf_dns_server_ip = co_await detail::parse_resolvconf();
-            }
-            dns_server_ip = detail::resolvconf_dns_server_ip.c_str();
-        }
-
-        // Make a DNS request
-        ::dns::packet_t resp = co_await dns_query(*dns_server_ip, ::dns::standard_query(host));
+    inline task<std::string> lookup(std::string_view host, std::string_view dns_server_ip) {
+        ::dns::packet_t resp = co_await dns_query(dns_server_ip, ::dns::standard_query(host));
         resp.throw_rcode();
         uint32_t ip = -1;
         for (const auto& ans : resp.answer_RRs) {
@@ -136,19 +136,12 @@ namespace async::dns {
         }
         if (ip == -1u) { throw ex::runtime("no valid answers in DNS response"); }
         std::string ip_str = c_api::inet_htop(AF_INET, ip);
-        detail::dns_cache.emplace(host_hash, ip_str);
         co_return ip_str;
     }
 
-    inline task<std::optional<std::string>> ip_to_host(std::string_view ip, std::optional<std::string_view> dns_server_ip = std::nullopt) {
-        if (!dns_server_ip) {
-            if (detail::resolvconf_dns_server_ip.empty()) { // Initialize thread_local 
-                detail::resolvconf_dns_server_ip = co_await detail::parse_resolvconf();
-            }
-            dns_server_ip = detail::resolvconf_dns_server_ip;
-        }
+    inline task<std::optional<std::string>> reverse_lookup(std::string_view ip, std::string_view dns_server_ip) {
         ::dns::packet_t req = ::dns::reverse_query(ip);
-        ::dns::packet_t resp = co_await dns_query(*dns_server_ip, req);
+        ::dns::packet_t resp = co_await dns_query(dns_server_ip, req);
         if (resp.flags.rcode == ::dns::rcode_t::name_error) { // No such name
             co_return std::nullopt;
         }
@@ -160,5 +153,30 @@ namespace async::dns {
             co_return ::dns::from_PTR_RR(ans);
         }
         throw ex::runtime("no valid answers in DNS response");
+    }
+
+    // Lookup with /etc/hosts and cache. Noop if host is already an ip address.
+    inline task<std::string> host_to_ip(std::string_view host) {
+        // Return as is if host is already an ip address
+        try {
+            (void) c_api::inet_pton(AF_INET, host);
+            co_return std::string(host);
+        } catch (std::exception&) {}
+
+        // Lookup in cache
+        const size_t host_hash = std::hash<std::string_view>{}(host);
+        if (auto s = co_await detail::cache.get_cache(host_hash); !s.empty()) {
+            co_return s;
+        }
+
+        // Make a DNS request
+        auto dns_server_ip = co_await detail::cache.get_server_ip();
+        std::string ip_str = co_await lookup(host, dns_server_ip);
+        detail::cache.put_cache(host_hash, ip_str);
+        co_return ip_str;
+    }
+
+    inline task<std::optional<std::string>> ip_to_host(std::string_view ip) {
+        co_return co_await reverse_lookup(ip, co_await detail::cache.get_server_ip());
     }
 }

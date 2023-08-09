@@ -222,7 +222,7 @@ namespace dns::detail {
                 checklen(1);
                 if (str[0] == '\0') {
                     (void) byte();
-                    if (!ret.empty() && ret.back() == '.') { ret.pop_back(); }
+                    if (ret.ends_with('.')) { ret.pop_back(); }
                     return ret;
                 } else if ((str[0] & 0b11000000u) == 0b11000000u) {
                     uint16_t offset = word() & 0b00111111'11111111u;

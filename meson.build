@@ -5,4 +5,5 @@ project('async2', 'cpp',
 executable('async2',
            'main.cpp',
            include_directories : ['libs', '../cp'],
+           link_args : '-lbearssl',
            install : true)

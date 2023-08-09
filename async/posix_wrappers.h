@@ -109,7 +109,7 @@ namespace async::c_api {
     }
     [[nodiscard]]
     inline uint32_t inet_ptoh(int af, std::string_view ip) {
-        return ntohl(c_api::inet_pton(af, std::string(ip).c_str()).s_addr);
+        return ntohl(c_api::inet_pton(af, ip).s_addr);
     }
     [[nodiscard]]
     inline std::string inet_ntop(int af, in_addr ip) {
@@ -153,63 +153,3 @@ namespace async::c_api {
         return client;
     }
 }
-
-// namespace async::posix {
-//     // Reusable
-//     class ConnectionCreator {
-//         using addrinfo_handle = std::unique_ptr<
-//             std::remove_pointer<addrinfo>::type,
-//             decltype(&freeaddrinfo)>;
-//         static constexpr addrinfo hints {
-//             .ai_flags = 0,
-//             .ai_family = AF_UNSPEC,      // Allow IPv4 or IPv6
-//             .ai_socktype = SOCK_STREAM,
-//             .ai_protocol = IPPROTO_TCP,
-//             .ai_addrlen = 0,
-//             .ai_addr = nullptr,
-//             .ai_canonname = nullptr,
-//             .ai_next = nullptr,
-//         };
-//
-//         addrinfo_handle ai_list {nullptr, freeaddrinfo};
-//         addrinfo* ai;
-//         int saved_err = 0;
-//         int sfd = -1;
-//     public:
-//         ConnectionCreator() = default;
-//         ConnectionCreator(const HostInfo& info) { start(info); }
-//
-//         void start(const HostInfo& info) {
-//             addrinfo* ai_tmp;
-//             int res = getaddrinfo(info.ip.c_str(), info.port.c_str(), &hints, &ai_tmp);
-//             if (res != 0) {
-//                 throw ex::runtime(fmt("getaddrinfo:", gai_strerror(res)));
-//             }
-//             ai_list.reset(ai_tmp);
-//             ai = ai_list.get();
-//             sfd = socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK, ai->ai_protocol);
-//             ex::wrape(sfd, "socket()");
-//         }
-//
-//         int think() {
-//             if (ai_list == nullptr) { return sfd; }
-//             while (true) {
-//                 if (connect(sfd, ai->ai_addr, ai->ai_addrlen) != -1) {
-//                     ai_list.reset();
-//                     return sfd;
-//                 } else if (errno == EAGAIN || errno == EALREADY || errno == EINPROGRESS) {
-//                     return -1;
-//                 } else {
-//                     saved_err = errno;
-//                     close(sfd);
-//                     ai = ai->ai_next;
-//                     if (ai == NULL) {
-//                         throw ex::fn("connect()", strerror(saved_err));
-//                     }
-//                     sfd = socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK, ai->ai_protocol);
-//                     ex::wrape(sfd, "socket()");
-//                 }
-//             }
-//         }
-//     };
-// }

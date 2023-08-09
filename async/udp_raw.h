@@ -25,10 +25,10 @@ namespace async::msg_transport {
     };
 }
 
-namespace async::detail {
+namespace async::udp::detail {
     // This is just to avoid recirsive includes, connect_udp also won't do lookup when passed an ip address.
-    inline task<msgstream<msg_transport::udp_socket>> connect_udp_nolookup(std::string_view ip, uint16_t port) {
-        c_api::fd fd = co_await detail::make_connected_socket(std::string(ip).c_str(), port, SOCK_DGRAM, IPPROTO_UDP);
-        co_return msgstream(msg_transport::udp_socket(std::move(fd)));
+    inline task<msg_transport::udp_socket> connect_udp_nolookup(std::string_view ip, uint16_t port) {
+        c_api::fd fd = co_await async::detail::make_connected_socket(ip, port, SOCK_DGRAM, IPPROTO_UDP);
+        co_return msg_transport::udp_socket(std::move(fd));
     }
 }
