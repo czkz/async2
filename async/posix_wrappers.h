@@ -8,6 +8,7 @@
 #include <netinet/tcp.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <sys/timerfd.h>
 
 // All functions are nonblocking and expect a nonblocking socket
 namespace async::c_api {
@@ -91,6 +92,16 @@ namespace async::c_api {
         c_api::fd fd {ex::wrape(::creat(std::string(pathname).c_str(), mode), "creat()")};
         c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
         return fd;
+    }
+    // Returns a non-blocking fd
+    [[nodiscard]]
+    inline fd timerfd_create(int clockfd = CLOCK_MONOTONIC, int flags = 0) {
+        c_api::fd fd (ex::wrape(::timerfd_create(clockfd, flags), "timerfd_create()"));
+        c_api::fcntl(fd, F_SETFL, O_NONBLOCK);
+        return fd;
+    }
+    inline void timerfd_settime(int fd, int flags, const itimerspec& new_value, struct itimerspec* old_value = nullptr) {
+        ex::wrape(::timerfd_settime(fd, flags, &new_value, old_value), "timerfd_settime()");
     }
     // Optional, use to close a descriptor early
     inline void close(fd& fd) noexcept {

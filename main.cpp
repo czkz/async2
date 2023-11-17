@@ -8,6 +8,7 @@
 #include "async/file.h"
 #include "async/tls.h"
 #include "async/slurp.h"
+#include "async/sleep.h"
 
 #include "async/poll_loop.h"
 #include <signal.h>
@@ -78,6 +79,12 @@ async::task<void> test_slurp() {
     prn(__FUNCTION__, "done.");
 }
 
+async::task<void> test_sleep() {
+    prn(__FUNCTION__, "start.");
+    co_await async::sleep(500);
+    prn(__FUNCTION__, "done.");
+}
+
 async::task<void> test_gather() {
     co_await gather_void(
         test_client(),
@@ -86,7 +93,8 @@ async::task<void> test_gather() {
         // test_file_rw(),
         test_dns(),
         test_tls(),
-        test_slurp()
+        test_slurp(),
+        test_sleep()
     );
     // prn("Gathered", x, y);
 }
