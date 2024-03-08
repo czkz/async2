@@ -19,10 +19,10 @@ namespace async::detail {
     struct promise_base {
         std::suspend_never initial_suspend() noexcept { return {}; }
         detail::suspend_when final_suspend() noexcept {
-            if (this->caller) { this->caller.resume(); }
-            return detail::suspend_when(!this->caller);
+            if (this->awaiter) { this->awaiter.resume(); }
+            return detail::suspend_when(!this->awaiter);
         }
-        std::coroutine_handle<> caller;
+        std::coroutine_handle<> awaiter;
     };
 }
 
@@ -78,11 +78,11 @@ namespace async {
             return promise.result.index() != 0;
         }
         void await_suspend(std::coroutine_handle<> h) {
-            this->handle.promise().caller = h;
+            this->handle.promise().awaiter = h;
         }
         T await_resume() const {
             auto result = std::move(this->handle.promise().result);
-            if (!this->handle.promise().caller) {
+            if (!this->handle.promise().awaiter) {
                 this->handle.destroy();
             }
             if (result.index() == 2) {
@@ -111,11 +111,11 @@ namespace async {
             return this->handle.done();
         }
         void await_suspend(std::coroutine_handle<> h) {
-            this->handle.promise().caller = h;
+            this->handle.promise().awaiter = h;
         }
         void await_resume() const {
             auto exception = std::move(this->handle.promise().exception);
-            if (!this->handle.promise().caller) {
+            if (!this->handle.promise().awaiter) {
                 this->handle.destroy();
             }
             if (exception) { std::rethrow_exception(exception); }
