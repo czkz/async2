@@ -29,7 +29,7 @@ inline namespace string_conv {
         return ret;
     }
     template <typename T1, typename T2>
-    inline std::string to_string(std::pair<T1, T2> value) {
+    inline std::string to_string(std::pair<T1, T2> const& value) {
         std::string ret = "{ ";
         ret += to_string(value.first);
         ret += ' ';

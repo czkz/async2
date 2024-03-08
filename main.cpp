@@ -74,7 +74,7 @@ async::task<void> test_slurp() {
     assert(hosts1 == hosts2);
     // http://duck.com -> https://duck.com -> https://duckduckgo.com
     auto html = co_await async::slurp("http://duck.com");
-    assert(html.ends_with("</html>\n"));
+    assert(html.ends_with("</html>"));
     prn(__FUNCTION__, "done.");
 }
 

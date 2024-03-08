@@ -81,3 +81,5 @@ inline void poll_loop_t::swap_remove(size_t i) {
     suspended.pop_back();
     pfds.pop_back();
 }
+
+// TODO fix swap_remove(i--) underflow
