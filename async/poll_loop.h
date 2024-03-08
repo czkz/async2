@@ -65,11 +65,13 @@ inline void poll_loop_t::think() {
     }
     if (n_resumeable > 0) {
         int n_left = n_resumeable;
-        for (size_t i = 0; i < suspended.size(); i++) {
+        for (size_t i = 0; i < suspended.size(); ) {
             if (pfds[i].revents != 0) {
                 suspended[i].resume();
-                swap_remove(i--);
+                swap_remove(i);
                 if (--n_left == 0) { break; }
+            } else {
+                i++;
             }
         }
     }
@@ -81,5 +83,3 @@ inline void poll_loop_t::swap_remove(size_t i) {
     suspended.pop_back();
     pfds.pop_back();
 }
-
-// TODO fix swap_remove(i--) underflow
